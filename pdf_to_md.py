@@ -2,6 +2,7 @@
 """
 PDF to Markdown converter using Marker.
 Converts bank/credit card statement PDFs to Markdown format.
+Reads configuration from MARKER.md config file.
 """
 
 import argparse
@@ -30,9 +31,47 @@ PROGRESS_PATTERN = re.compile(
     r'([\r\n]|^)([A-Za-z][A-Za-z ]+):\s*(\d+%\|)([█▏▎▍▌▋▊▉ ]+\|)\s*(\d+/\d+)\s*(\[.+\])'
 )
 
+# Pattern to match empty progress bars (0 items) - includes surrounding whitespace/newlines
+EMPTY_PROGRESS_PATTERN = re.compile(
+    r'\r?\n?[A-Za-z][A-Za-z ]+:\s*0it \[\d+:\d+, \?it/s\]\r?\n?'
+)
+
+
+def load_marker_config(config_path: Path) -> list:
+    """Load Marker flags from config file, skipping comments."""
+    flags = []
+
+    if not config_path.exists():
+        print(f"Warning: Config file not found: {config_path}", file=sys.stderr)
+        return flags
+
+    with open(config_path, "r") as f:
+        for line in f:
+            line = line.strip()
+
+            # Skip empty lines and pure comment lines
+            if not line or line.startswith("#"):
+                continue
+
+            # Check if line starts with -- (active flag)
+            if line.startswith("--"):
+                # Handle flag with value on same line
+                parts = line.split(None, 1)  # Split on whitespace, max 2 parts
+                flag = parts[0]
+                flags.append(flag)
+                if len(parts) > 1:
+                    flags.append(parts[1])
+
+    return flags
+
 
 def align_progress_labels(text):
     """Normalize progress bar to fixed width format for alignment."""
+    # Filter out empty progress bars (0 items)
+    text = EMPTY_PROGRESS_PATTERN.sub('', text)
+    # Clean up any resulting double newlines
+    text = re.sub(r'\n\n+', '\n', text)
+    
     def replace_label(match):
         prefix = match.group(1)
         label = match.group(2).ljust(LABEL_WIDTH)
@@ -126,50 +165,64 @@ def run_with_pty(cmd, env):
 
 
 def main():
+    # Find config file - look in same directory as script
+    script_dir = Path(__file__).parent.resolve()
+    config_path = script_dir / "MARKER.md"
+
+    # Parse arguments (only CLI-specific args, not Marker flags)
     parser = argparse.ArgumentParser(description="Convert PDF to Markdown using Marker")
     parser.add_argument("input_pdf", type=Path, help="Path to input PDF file")
     parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Overwrite existing output file",
+        "--overwrite", action="store_true", help="Overwrite existing output file"
     )
     parser.add_argument(
         "--verbose", "-v", action="store_true", help="Show verbose output"
     )
     parser.add_argument(
-        "--use-llm",
-        action="store_true",
-        help="Use LLM for improved table extraction (requires Ollama, slower but better results)",
+        "--use-llm", action="store_true", help="Enable LLM (overrides config)"
+    )
+    parser.add_argument(
+        "--no-llm", action="store_true", help="Disable LLM (overrides config)"
     )
     parser.add_argument(
         "--html-tables",
         action="store_true",
-        default=False,
-        help="Format tables as HTML in markdown",
+        help="Enable HTML tables (overrides config)",
     )
     parser.add_argument(
         "--no-html-tables",
-        action="store_false",
-        dest="html_tables",
-        help="Use Markdown format for tables instead of HTML (default)",
+        action="store_true",
+        help="Disable HTML tables (overrides config)",
     )
     parser.add_argument(
-        "--ollama-model",
-        default="minimax-m2.5:cloud",
-        help="Ollama model to use (default: minimax-m2.5:cloud)",
+        "--ollama-model", default=None, help="Ollama model (overrides config)"
     )
     parser.add_argument(
         "--workers",
         "-w",
         type=int,
-        default=1,
-        help="Number of parallel workers (default: 1)",
+        default=None,
+        help="Number of workers (overrides config)",
+    )
+    parser.add_argument(
+        "--config", type=Path, default=config_path, help="Path to config file"
     )
 
     args = parser.parse_args()
 
+    # Load config from MARKER.md
+    config_flags = load_marker_config(args.config)
+
+    # Determine effective flags (CLI overrides config)
     use_llm = args.use_llm
     html_tables = args.html_tables
+
+    # Check config for defaults if not set via CLI
+    if not args.use_llm and not args.no_llm:
+        use_llm = "--use_llm" in config_flags
+
+    if not args.html_tables and not args.no_html_tables:
+        html_tables = "--html_tables_in_markdown" in config_flags
 
     input_path = args.input_pdf.resolve()
 
@@ -194,56 +247,75 @@ def main():
     output_dir = output_path.parent
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    cmd = [
-        "marker_single",
-        str(input_path),
-        "--output_format",
-        "markdown",
-        "--disable_image_extraction",
-        "--converter_cls",
-        "marker.converters.table.TableConverter",
-        "--output_dir",
-        str(output_dir),
-    ]
+    # Build command from config
+    cmd = ["marker_single", str(input_path)]
 
-    if html_tables:
-        cmd.append("--html_tables_in_markdown")
+    # Add config flags (skip output_dir, we'll add it manually)
+    for flag in config_flags:
+        if flag == "--output_dir":
+            continue
+        cmd.append(flag)
 
-    if args.workers > 1:
-        cmd.extend(["--detection_batch_size", str(args.workers)])
-        cmd.extend(["--recognition_batch_size", str(args.workers)])
-        cmd.extend(["--layout_batch_size", str(args.workers)])
+    # Add output_dir
+    cmd.extend(["--output_dir", str(output_dir)])
 
+    # CLI overrides for LLM
     if use_llm:
-        cmd.extend(
-            [
-                "--use_llm",
-                "--llm_service",
-                "marker.services.ollama.OllamaService",
-                "--ollama_base_url",
-                "http://localhost:11434",
-                "--ollama_model",
-                args.ollama_model,
-            ]
-        )
+        if "--use_llm" not in cmd:
+            cmd.append("--use_llm")
+        # Ensure LLM service is set
+        if "--llm_service" not in cmd:
+            cmd.extend(["--llm_service", "marker.services.ollama.OllamaService"])
+        if "--ollama_base_url" not in cmd:
+            cmd.extend(["--ollama_base_url", "http://localhost:11434"])
+    elif args.no_llm and "--use_llm" in cmd:
+        # Remove --use_llm if explicitly disabled
+        idx = cmd.index("--use_llm")
+        cmd.pop(idx)
+
+    # CLI override for HTML tables
+    if html_tables:
+        if "--html_tables_in_markdown" not in cmd:
+            cmd.append("--html_tables_in_markdown")
+    elif args.no_html_tables and "--html_tables_in_markdown" in cmd:
+        idx = cmd.index("--html_tables_in_markdown")
+        cmd.pop(idx)
+
+    # CLI override for Ollama model
+    if args.ollama_model:
+        # Find and replace or add
+        if "--ollama_model" in cmd:
+            idx = cmd.index("--ollama_model")
+            cmd[idx + 1] = args.ollama_model
+        else:
+            cmd.extend(["--ollama_model", args.ollama_model])
+
+    # CLI override for workers (batch sizes)
+    if args.workers and args.workers > 1:
+        # Adjust batch sizes for parallel processing
+        for batch_type in ["layout", "detection", "recognition"]:
+            flag = f"--{batch_type}_batch_size"
+            if flag in cmd:
+                idx = cmd.index(flag)
+                cmd[idx + 1] = str(args.workers)
+            else:
+                cmd.extend([flag, str(args.workers)])
 
     if args.verbose:
         print(f"Running: {' '.join(cmd)}", file=sys.stderr)
 
     llm_status = " with LLM" if use_llm else ""
     table_status = " (HTML tables)" if html_tables else " (Markdown tables)"
-    workers_status = f" ({args.workers} workers)" if args.workers > 1 else ""
+    workers_status = (
+        f" ({args.workers} workers)" if args.workers and args.workers > 1 else ""
+    )
 
     print(
         f"Converting: {input_path.name}{llm_status}{table_status}{workers_status}...",
         file=sys.stderr,
     )
-    print(
-        f"Using Apple Silicon GPU (MPS) where supported",
-        file=sys.stderr,
-    )
+    print(f"Using Apple Silicon GPU (MPS) where supported", file=sys.stderr)
 
-    # Set environment for unbuffered output and MPS optimization
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
     env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
@@ -290,7 +362,6 @@ def main():
                     output_path.unlink()
             shutil.copy2(final_output, output_path)
 
-        # Clean up the directory Marker created
         if expected_dir.exists() and expected_dir.is_dir():
             shutil.rmtree(expected_dir)
 
