@@ -16,7 +16,11 @@ import struct
 import subprocess
 import sys
 import termios
+import time
 from pathlib import Path
+
+# Apply patch for PdfProvider password support
+from pdfprovider_patch import *
 
 # Width for progress bar labels (longest is "Running OCR Error Detection")
 LABEL_WIDTH = 28
@@ -164,6 +168,275 @@ def run_with_pty(cmd, env):
     return process.returncode, stdout_data.decode("utf-8", errors="replace")
 
 
+def process_single_pdf(input_path: Path, args, config_flags):
+    """Process a single PDF file and return the output path."""
+    output_path = input_path.with_suffix(".md")
+
+    if output_path.exists() and not args.overwrite:
+        raise FileExistsError(f"Output file already exists: {output_path}")
+
+    output_dir = output_path.parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build command from config
+    cmd = ["marker_single", str(input_path)]
+
+    # Add password if provided in .env file
+    pdf_password = os.getenv("PDF_PASSWORD")
+    if pdf_password:
+        cmd.extend(["--password", pdf_password])
+
+    # Add config flags (skip output_dir, we'll add it manually)
+    for flag in config_flags:
+        if flag == "--output_dir":
+            continue
+        cmd.append(flag)
+
+    # Add output_dir
+    cmd.extend(["--output_dir", str(output_dir)])
+
+    # CLI overrides for LLM
+    use_llm = args.use_llm
+    if not args.use_llm and not args.no_llm:
+        use_llm = "--use_llm" in config_flags
+
+    if use_llm:
+        if "--use_llm" not in cmd:
+            cmd.append("--use_llm")
+        # Ensure LLM service is set
+        if "--llm_service" not in cmd:
+            cmd.extend(["--llm_service", "marker.services.ollama.OllamaService"])
+        if "--ollama_base_url" not in cmd:
+            cmd.extend(["--ollama_base_url", "http://localhost:11434"])
+    elif args.no_llm and "--use_llm" in cmd:
+        # Remove --use_llm if explicitly disabled
+        idx = cmd.index("--use_llm")
+        cmd.pop(idx)
+
+    # CLI override for HTML tables
+    html_tables = args.html_tables
+    if not args.html_tables and not args.no_html_tables:
+        html_tables = "--html_tables_in_markdown" in config_flags
+
+    if html_tables:
+        if "--html_tables_in_markdown" not in cmd:
+            cmd.append("--html_tables_in_markdown")
+    elif args.no_html_tables and "--html_tables_in_markdown" in cmd:
+        idx = cmd.index("--html_tables_in_markdown")
+        cmd.pop(idx)
+
+    # CLI override for Ollama model
+    if args.ollama_model:
+        # Find and replace or add
+        if "--ollama_model" in cmd:
+            idx = cmd.index("--ollama_model")
+            cmd[idx + 1] = args.ollama_model
+        else:
+            cmd.extend(["--ollama_model", args.ollama_model])
+
+    # CLI override for workers (batch sizes)
+    if args.workers and args.workers > 1:
+        # Adjust batch sizes for parallel processing
+        for batch_type in ["layout", "detection", "recognition"]:
+            flag = f"--{batch_type}_batch_size"
+            if flag in cmd:
+                idx = cmd.index(flag)
+                cmd[idx + 1] = str(args.workers)
+            else:
+                cmd.extend([flag, str(args.workers)])
+
+    if args.verbose:
+        print(f"Running: {' '.join(cmd)}", file=sys.stderr)
+
+    llm_status = " with LLM" if use_llm else ""
+    table_status = " (HTML tables)" if html_tables else " (Markdown tables)"
+    workers_status = (
+        f" ({args.workers} workers)" if args.workers and args.workers > 1 else ""
+    )
+
+    print(
+        f"Converting: {input_path.name}{llm_status}{table_status}{workers_status}...",
+        file=sys.stderr,
+    )
+    print(f"Using Apple Silicon GPU (MPS) where supported", file=sys.stderr)
+
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+    
+    # Suppress unnecessary warnings
+    env["PYTHONWARNINGS"] = "ignore"
+    
+    # Set password if provided
+    if args.password:
+        env["PDF_PASSWORD"] = args.password
+
+    try:
+        returncode, stdout = run_with_pty(cmd, env)
+
+        if returncode != 0:
+            error_msg = f"Marker failed with exit code {returncode}"
+            if stdout:
+                error_msg += f"\n{stdout}"
+            raise subprocess.CalledProcessError(returncode, ' '.join(cmd), error_msg)
+
+        expected_dir = output_dir / input_path.stem
+
+        possible_outputs = [
+            expected_dir / f"{input_path.stem}.md",
+            expected_dir.with_suffix(".md"),
+            expected_dir,
+        ]
+
+        final_output = None
+        for out_path in possible_outputs:
+            if out_path.is_file() and out_path.stat().st_size > 0:
+                final_output = out_path
+                break
+            elif out_path.is_dir():
+                md_files = list(out_path.glob("*.md"))
+                for md_file in md_files:
+                    if md_file.stat().st_size > 0:
+                        final_output = md_file
+                        break
+                if final_output:
+                    break
+
+        if final_output and final_output != output_path:
+            if output_path.exists():
+                if output_path.is_dir():
+                    shutil.rmtree(output_path)
+                else:
+                    output_path.unlink()
+            shutil.copy2(final_output, output_path)
+
+        if expected_dir.exists() and expected_dir.is_dir():
+            shutil.rmtree(expected_dir)
+
+        if output_path.exists():
+            print(f"\nOutput: {output_path}", file=sys.stderr)
+            print("Done.", file=sys.stderr)
+            return output_path
+        else:
+            raise FileNotFoundError("Marker did not produce output file")
+
+    except FileNotFoundError as e:
+        if "marker_single" in str(e):
+            raise FileNotFoundError("marker_single command not found. Make sure marker-pdf is installed and in PATH.")
+        raise
+    except Exception as e:
+        raise
+
+def process_directory(input_path: Path, args, config_flags):
+    """Process all PDFs in a directory and merge them into a single markdown file."""
+    print(f"Processing directory: {input_path}", file=sys.stderr)
+    print(f"Searching for PDF files...", file=sys.stderr)
+
+    # Case-insensitive PDF file search
+    pdf_files = []
+    for file in input_path.iterdir():
+        if file.is_file() and file.suffix.lower() == ".pdf":
+            pdf_files.append(file)
+    
+    if not pdf_files:
+        print(f"Error: No PDF files found in directory: {input_path}", file=sys.stderr)
+        sys.exit(1)
+
+    # Sort files by filename
+    pdf_files = sorted(pdf_files, key=lambda x: x.name)
+
+    print(f"Found {len(pdf_files)} PDF files:", file=sys.stderr)
+    for pdf in pdf_files:
+        print(f"  - {pdf.name}", file=sys.stderr)
+
+    merged_content = []
+    successful_files = []
+    skipped_files = []
+    failed_files = []
+
+    start_time = time.time()
+
+    for i, pdf_file in enumerate(pdf_files, 1):
+        print(f"\nProcessing {i}/{len(pdf_files)}: {pdf_file.name}", file=sys.stderr)
+        try:
+            # Check if markdown file already exists
+            md_file = input_path / f"{pdf_file.stem}.md"
+            if md_file.exists() and not args.overwrite:
+                print(f"Skipping {pdf_file.name}: Output file already exists", file=sys.stderr)
+                skipped_files.append(pdf_file.name)
+                # Still include existing file in merged content
+                with open(md_file, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                merged_content.append(f"\n---\n")
+                merged_content.append(f"# {pdf_file.stem}\n")
+                merged_content.append(f"**Source File:** {pdf_file.name}\n")
+                merged_content.append(f"---\n")
+                merged_content.append(content)
+                merged_content.append(f"\n")
+            else:
+                # Process new file
+                output_path = process_single_pdf(pdf_file, args, config_flags)
+                with open(output_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                merged_content.append(f"\n---\n")
+                merged_content.append(f"# {pdf_file.stem}\n")
+                merged_content.append(f"**Source File:** {pdf_file.name}\n")
+                merged_content.append(f"---\n")
+                merged_content.append(content)
+                merged_content.append(f"\n")
+                successful_files.append(pdf_file.name)
+        except Exception as e:
+            print(f"Error processing {pdf_file.name}: {e}", file=sys.stderr)
+            failed_files.append(pdf_file.name)
+
+    total_time = time.time() - start_time
+
+    # Create merged output with timestamp
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    merged_output_path = input_path / f"merged_statements_{timestamp}.md"
+    with open(merged_output_path, 'w', encoding='utf-8') as f:
+        f.write("".join(merged_content))
+
+    # Also create a symlink to the latest version
+    latest_symlink = input_path / "merged_statements_latest.md"
+    if latest_symlink.exists():
+        if latest_symlink.is_symlink():
+            latest_symlink.unlink()
+        elif latest_symlink.is_file():
+            latest_symlink.unlink()
+        elif latest_symlink.is_dir():
+            shutil.rmtree(latest_symlink)
+    
+    try:
+        # Create symlink relative to the target
+        latest_symlink.symlink_to(merged_output_path.name)
+    except Exception as e:
+        print(f"Warning: Could not create symlink to latest version: {e}", file=sys.stderr)
+        # Fallback to absolute path if relative fails
+        try:
+            latest_symlink.symlink_to(merged_output_path)
+        except Exception as e2:
+            print(f"Warning: Could not create absolute symlink: {e2}", file=sys.stderr)
+
+    print(f"\nSuccessfully processed {len(successful_files)} files:", file=sys.stderr)
+    for file in successful_files:
+        print(f"  - {file}", file=sys.stderr)
+
+    if skipped_files:
+        print(f"\nSkipped {len(skipped_files)} files (already processed):", file=sys.stderr)
+        for file in skipped_files:
+            print(f"  - {file}", file=sys.stderr)
+
+    if failed_files:
+        print(f"\nFailed to process {len(failed_files)} files:", file=sys.stderr)
+        for file in failed_files:
+            print(f"  - {file}", file=sys.stderr)
+
+    print(f"\nMerged output: {merged_output_path}", file=sys.stderr)
+    print(f"Total time: {total_time:.1f} seconds", file=sys.stderr)
+    print("Done.", file=sys.stderr)
+    return merged_output_path
+
 def main():
     # Find config file - look in same directory as script
     script_dir = Path(__file__).parent.resolve()
@@ -171,7 +444,12 @@ def main():
 
     # Parse arguments (only CLI-specific args, not Marker flags)
     parser = argparse.ArgumentParser(description="Convert PDF to Markdown using Marker")
-    parser.add_argument("input_pdf", type=Path, help="Path to input PDF file")
+    parser.add_argument("input_pdf", type=Path, help="Path to input PDF file or directory")
+    parser.add_argument(
+        "--password", "-p", 
+        default=None, 
+        help="Password for password-protected PDF files"
+    )
     parser.add_argument(
         "--overwrite", action="store_true", help="Overwrite existing output file"
     )
@@ -227,159 +505,33 @@ def main():
     input_path = args.input_pdf.resolve()
 
     if not input_path.exists():
-        print(f"Error: Input file not found: {input_path}", file=sys.stderr)
+        print(f"Error: Input path not found: {input_path}", file=sys.stderr)
         sys.exit(1)
 
-    if not input_path.is_file():
-        print(f"Error: Not a file: {input_path}", file=sys.stderr)
-        sys.exit(1)
-
-    if input_path.suffix.lower() != ".pdf":
-        print(f"Error: Not a PDF file: {input_path}", file=sys.stderr)
-        sys.exit(1)
-
-    output_path = input_path.with_suffix(".md")
-
-    if output_path.exists() and not args.overwrite:
-        print(f"Error: Output file already exists: {output_path}", file=sys.stderr)
-        sys.exit(1)
-
-    output_dir = output_path.parent
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Build command from config
-    cmd = ["marker_single", str(input_path)]
-
-    # Add config flags (skip output_dir, we'll add it manually)
-    for flag in config_flags:
-        if flag == "--output_dir":
-            continue
-        cmd.append(flag)
-
-    # Add output_dir
-    cmd.extend(["--output_dir", str(output_dir)])
-
-    # CLI overrides for LLM
-    if use_llm:
-        if "--use_llm" not in cmd:
-            cmd.append("--use_llm")
-        # Ensure LLM service is set
-        if "--llm_service" not in cmd:
-            cmd.extend(["--llm_service", "marker.services.ollama.OllamaService"])
-        if "--ollama_base_url" not in cmd:
-            cmd.extend(["--ollama_base_url", "http://localhost:11434"])
-    elif args.no_llm and "--use_llm" in cmd:
-        # Remove --use_llm if explicitly disabled
-        idx = cmd.index("--use_llm")
-        cmd.pop(idx)
-
-    # CLI override for HTML tables
-    if html_tables:
-        if "--html_tables_in_markdown" not in cmd:
-            cmd.append("--html_tables_in_markdown")
-    elif args.no_html_tables and "--html_tables_in_markdown" in cmd:
-        idx = cmd.index("--html_tables_in_markdown")
-        cmd.pop(idx)
-
-    # CLI override for Ollama model
-    if args.ollama_model:
-        # Find and replace or add
-        if "--ollama_model" in cmd:
-            idx = cmd.index("--ollama_model")
-            cmd[idx + 1] = args.ollama_model
-        else:
-            cmd.extend(["--ollama_model", args.ollama_model])
-
-    # CLI override for workers (batch sizes)
-    if args.workers and args.workers > 1:
-        # Adjust batch sizes for parallel processing
-        for batch_type in ["layout", "detection", "recognition"]:
-            flag = f"--{batch_type}_batch_size"
-            if flag in cmd:
-                idx = cmd.index(flag)
-                cmd[idx + 1] = str(args.workers)
-            else:
-                cmd.extend([flag, str(args.workers)])
-
-    if args.verbose:
-        print(f"Running: {' '.join(cmd)}", file=sys.stderr)
-
-    llm_status = " with LLM" if use_llm else ""
-    table_status = " (HTML tables)" if html_tables else " (Markdown tables)"
-    workers_status = (
-        f" ({args.workers} workers)" if args.workers and args.workers > 1 else ""
-    )
-
-    print(
-        f"Converting: {input_path.name}{llm_status}{table_status}{workers_status}...",
-        file=sys.stderr,
-    )
-    print(f"Using Apple Silicon GPU (MPS) where supported", file=sys.stderr)
-
-    env = os.environ.copy()
-    env["PYTHONUNBUFFERED"] = "1"
-    env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
-
-    try:
-        returncode, stdout = run_with_pty(cmd, env)
-
-        if returncode != 0:
-            print(
-                f"\nError: Marker failed with exit code {returncode}",
-                file=sys.stderr,
-            )
-            if stdout:
-                print(stdout, file=sys.stderr)
-            sys.exit(returncode)
-
-        expected_dir = output_dir / input_path.stem
-
-        possible_outputs = [
-            expected_dir / f"{input_path.stem}.md",
-            expected_dir.with_suffix(".md"),
-            expected_dir,
-        ]
-
-        final_output = None
-        for out_path in possible_outputs:
-            if out_path.is_file() and out_path.stat().st_size > 0:
-                final_output = out_path
-                break
-            elif out_path.is_dir():
-                md_files = list(out_path.glob("*.md"))
-                for md_file in md_files:
-                    if md_file.stat().st_size > 0:
-                        final_output = md_file
-                        break
-                if final_output:
-                    break
-
-        if final_output and final_output != output_path:
-            if output_path.exists():
-                if output_path.is_dir():
-                    shutil.rmtree(output_path)
-                else:
-                    output_path.unlink()
-            shutil.copy2(final_output, output_path)
-
-        if expected_dir.exists() and expected_dir.is_dir():
-            shutil.rmtree(expected_dir)
-
-        if output_path.exists():
-            print(f"\nOutput: {output_path}", file=sys.stderr)
-            print("Done.", file=sys.stderr)
-            sys.exit(0)
-        else:
-            print("Error: Marker did not produce output file", file=sys.stderr)
+    if input_path.is_file():
+        if input_path.suffix.lower() != ".pdf":
+            print(f"Error: Not a PDF file: {input_path}", file=sys.stderr)
             sys.exit(1)
-
-    except FileNotFoundError:
-        print("Error: marker_single command not found.", file=sys.stderr)
-        print("Make sure marker-pdf is installed and in PATH.", file=sys.stderr)
-        sys.exit(1)
-
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        
+        # Process single PDF file
+        print(f"Processing single file: {input_path}", file=sys.stderr)
+        try:
+            output_path = process_single_pdf(input_path, args, config_flags)
+            sys.exit(0)
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    
+    elif input_path.is_dir():
+        # Process directory of PDF files
+        try:
+            output_path = process_directory(input_path, args, config_flags)
+            sys.exit(0)
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        print(f"Error: Input must be a file or directory: {input_path}", file=sys.stderr)
         sys.exit(1)
 
 

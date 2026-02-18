@@ -10,6 +10,9 @@ A fast CLI tool for extracting data tables from computer-generated financial doc
 - **Apple Silicon optimized** - Uses MPS GPU acceleration where supported
 - **Real-time progress** - Streaming progress bars with consistent formatting
 - **Configurable** - External config file (`MARKER.md`) for persistent settings
+- **Batch processing** - Automatically detects directories and processes all PDFs
+- **Password protection** - Handles encrypted PDFs with password support
+- **Merged output** - Combines all statements into a single Markdown file
 
 ## Installation
 
@@ -20,11 +23,17 @@ uv sync
 ## Quick Start
 
 ```bash
-# Basic conversion (fastest for computer-generated PDFs)
+# Basic conversion (single file)
 uv run pdf_to_md.py statement.pdf
 
 # Overwrite existing output
 uv run pdf_to_md.py statement.pdf --overwrite
+
+# Batch processing of entire directory
+uv run pdf_to_md.py /path/to/statements
+
+# Process encrypted PDFs with password
+uv run pdf_to_md.py --password "your_password" /path/to/encrypted_statements
 ```
 
 ## Performance
@@ -41,7 +50,7 @@ Processing time on Apple Silicon (M1 Max):
 
 | Option | Description |
 |--------|-------------|
-| `input_pdf` | Path to input PDF file (required) |
+| `input_pdf` | Path to input PDF file or directory containing PDFs (required) |
 | `--overwrite` | Overwrite existing output file |
 | `--verbose`, `-v` | Show verbose output including full command |
 | `--use-llm` | Enable LLM for improved table extraction |
@@ -51,6 +60,7 @@ Processing time on Apple Silicon (M1 Max):
 | `--ollama-model MODEL` | Ollama model (default: minimax-m2.5:cloud) |
 | `--workers N`, `-w N` | Parallel workers for batch processing |
 | `--config PATH` | Path to config file (default: MARKER.md) |
+| `--password PASS` | Password for encrypted PDF files |
 
 ## Configuration
 
@@ -72,7 +82,15 @@ CLI options override config file settings.
 
 ## Output
 
+### Single File Conversion
 The converted Markdown file is saved alongside the input PDF with a `.md` extension.
+
+### Batch Directory Conversion
+- **Individual Markdown files** for each PDF are saved alongside their respective source files
+- **Merged file** containing all statements: `merged_statements_YYYYMMDD_HHMMSS.md`
+- **Symlink to latest merge**: `merged_statements_latest.md` (points to the most recent merged file)
+
+The merged file includes metadata headers for each statement showing the source file name.
 
 ## Requirements
 
@@ -94,6 +112,9 @@ ollama pull minimax-m2.5:cloud
 - **OCR** is disabled by default for faster processing of computer-generated PDFs. Enable in `MARKER.md` for scanned documents.
 - **GPU**: Uses Apple Silicon MPS where supported. Some models fall back to CPU.
 - **Progress bars**: Empty progress bars (0 items) are automatically filtered.
+- **Existing files**: By default, already processed files (with existing .md outputs) are skipped. Use --overwrite to force reprocessing.
+- **Encryption**: Password-protected PDFs are supported with the --password option. Encrypted files without a password will fail to process.
+- **File ordering**: Files are processed in alphabetical order for consistent results.
 
 ## License
 
