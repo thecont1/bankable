@@ -58,6 +58,7 @@ Processing time on Apple Silicon (M1 Max):
 | `--html-tables` | Format tables as HTML in markdown |
 | `--no-html-tables` | Use Markdown format for tables |
 | `--ollama-model MODEL` | Ollama model (default: minimax-m2.5:cloud) |
+| `--password PASS`, `-p PASS` | Password for encrypted PDF files |
 | `--workers N`, `-w N` | Parallel workers for batch processing |
 | `--config PATH` | Path to config file (default: MARKER.md) |
 | `--password PASS` | Password for encrypted PDF files |
@@ -113,7 +114,7 @@ ollama pull minimax-m2.5:cloud
 - **GPU**: Uses Apple Silicon MPS where supported. Some models fall back to CPU.
 - **Progress bars**: Empty progress bars (0 items) are automatically filtered.
 - **Existing files**: By default, already processed files (with existing .md outputs) are skipped. Use --overwrite to force reprocessing.
-- **Encryption**: Password-protected PDFs are supported with the --password option. Encrypted files without a password will fail to process.
+- **Encryption**: Password-protected PDFs are supported with the --password option. Encrypted files without a password will fail to process. Password support is provided via runtime patching of Marker's internal PDF handling.
 - **File ordering**: Files are processed in alphabetical order for consistent results.
 
 ## License

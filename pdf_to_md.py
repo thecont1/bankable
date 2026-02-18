@@ -488,6 +488,13 @@ def main():
 
     args = parser.parse_args()
 
+    # Handle password
+    if args.password:
+        os.environ["PDF_PASSWORD"] = args.password
+    
+    # Apply patches for password support
+    patch_all()
+
     # Load config from MARKER.md
     config_flags = load_marker_config(args.config)
 
