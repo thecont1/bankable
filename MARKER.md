@@ -52,7 +52,7 @@
 #### --page_range
 
 ### Disable OCR (use only if PDF has selectable text)
-#### --disable_ocr
+--disable_ocr
 
 ### Force OCR on all pages (for scanned documents)
 #### --force_ocr
