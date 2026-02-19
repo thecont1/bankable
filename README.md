@@ -34,6 +34,12 @@ uv run pdf_to_md.py /path/to/statements
 
 # Process encrypted PDFs with password
 uv run pdf_to_md.py --password "your_password" /path/to/encrypted_statements
+
+# Extract transactions using Llama3.2:3b LLM
+uv run pdf_to_md.py statement.pdf --extract-transactions
+
+# Extract transactions from directory
+uv run pdf_to_md.py /path/to/statements --extract-transactions
 ```
 
 ## Performance
@@ -61,6 +67,28 @@ Processing time on Apple Silicon (M1 Max):
 | `--password PASS`, `-p PASS` | Password for encrypted PDF files |
 | `--workers N`, `-w N` | Parallel workers for batch processing |
 | `--config PATH` | Path to config file (default: MARKER.md) |
+| `--extract-transactions`, `-e` | Extract transactions using Llama3.2:3b LLM |
+
+## LLM Transaction Extraction
+
+The `--extract-transactions` option uses Llama3.2:3b, a locally hosted LLM available at `http://localhost:11434/`, to extract transaction data from the generated markdown. This provides clean, structured transaction tables with:
+
+- Date
+- Transaction Description  
+- Amount (in Rs.)
+
+### Requirements
+
+- **Llama3.2:3b model** must be available locally
+- Ollama service must be running on `http://localhost:11434/`
+- Requests library (automatically installed via uv sync)
+
+### How it works
+
+1. The PDF is first converted to markdown using Marker
+2. The raw markdown is analyzed by Llama3.2:3b
+3. The LLM extracts and formats transaction data into a clean table
+4. The processed markdown replaces the raw output
 
 ## Configuration
 
