@@ -43,8 +43,9 @@ def patch_marker_pdfprovider():
             
             doc = None
             try:
-                if self.password:
-                    doc = pdfium.PdfDocument(self.filepath, password=self.password)
+                password = os.environ.get("PDF_PASSWORD")
+                if password:
+                    doc = pdfium.PdfDocument(self.filepath, password=password)
                 else:
                     doc = pdfium.PdfDocument(self.filepath)
                 

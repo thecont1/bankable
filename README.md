@@ -114,7 +114,7 @@ ollama pull minimax-m2.5:cloud
 - **GPU**: Uses Apple Silicon MPS where supported. Some models fall back to CPU.
 - **Progress bars**: Empty progress bars (0 items) are automatically filtered.
 - **Existing files**: By default, already processed files (with existing .md outputs) are skipped. Use --overwrite to force reprocessing.
-- **Encryption**: Password-protected PDFs are supported with the --password option. Encrypted files without a password will fail to process. Password support is provided via runtime patching of Marker's internal PDF handling.
+- **Encryption**: Password-protected PDFs are supported with the --password option. Encrypted files without a password will fail to process.
 - **File ordering**: Files are processed in alphabetical order for consistent results.
 
 ## License

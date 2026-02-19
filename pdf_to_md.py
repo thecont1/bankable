@@ -181,10 +181,7 @@ def process_single_pdf(input_path: Path, args, config_flags):
     # Build command from config
     cmd = ["marker_single", str(input_path)]
 
-    # Add password if provided in .env file
-    pdf_password = os.getenv("PDF_PASSWORD")
-    if pdf_password:
-        cmd.extend(["--password", pdf_password])
+
 
     # Add config flags (skip output_dir, we'll add it manually)
     for flag in config_flags:
