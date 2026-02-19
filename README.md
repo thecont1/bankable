@@ -61,7 +61,6 @@ Processing time on Apple Silicon (M1 Max):
 | `--password PASS`, `-p PASS` | Password for encrypted PDF files |
 | `--workers N`, `-w N` | Parallel workers for batch processing |
 | `--config PATH` | Path to config file (default: MARKER.md) |
-| `--password PASS` | Password for encrypted PDF files |
 
 ## Configuration
 
