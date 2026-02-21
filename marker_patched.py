@@ -20,6 +20,7 @@ patch_table_processor()
 from pdfprovider_patch import patch_all
 if os.environ.get("PDF_PASSWORD"):
     patch_all()
+    print("✅ Table split patch + PDF password support applied", file=sys.stderr)
 else:
     print("✅ Table split patch applied (no PDF password needed)", file=sys.stderr)
 
