@@ -37,9 +37,11 @@ def patch_marker_pdfprovider():
             self.password = os.environ.get("PDF_PASSWORD")
             original_init(self, filepath, config)
             
+        import contextlib
+
+        @contextlib.contextmanager
         def patched_get_doc(self):
             import pypdfium2 as pdfium
-            import contextlib
             
             doc = None
             try:
