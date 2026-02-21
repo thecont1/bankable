@@ -1,18 +1,19 @@
 # Bankable
 
-A fast CLI tool for extracting data tables from computer-generated financial documents (bank statements, credit card statements, etc.) and preparing them for further processing.
+End-to-end CLI tool for extracting structured transaction data from bank and credit card statement PDFs into clean CSV files.
+
+**Pipeline:** PDF → Marker → `.md` → Substitutions → LLM → `.csv` → Pandas cleanup
 
 ## Features
 
-- **Table-focused extraction** - Optimized for financial documents with complex tables
-- **Multiple output formats** - Markdown tables or HTML tables in Markdown
-- **LLM enhancement** - Optional Ollama integration for improved table parsing
-- **Apple Silicon optimized** - Uses MPS GPU acceleration where supported
-- **Real-time progress** - Streaming progress bars with consistent formatting
-- **Configurable** - External config file (`MARKER.md`) for persistent settings
-- **Batch processing** - Automatically detects directories and processes all PDFs
-- **Password protection** - Handles encrypted PDFs with password support
-- **Merged output** - Combines all statements into a single Markdown file
+- **PDF to CSV in one command** — single `pdf_to_csv.py` handles the entire pipeline
+- **Plug-and-play LLM** — switch Ollama models via `--model` flag without code changes
+- **Batch processing** — processes entire directories of PDFs, merges into one master CSV
+- **Smart table extraction** — custom patches fix Marker's handling of collapsed financial tables
+- **Password support** — handles encrypted PDFs via `--password` flag
+- **Text substitutions** — user-configurable find/replace rules (`SUBSTITUTIONS.md`) clean up OCR artifacts before LLM processing
+- **Deterministic post-processing** — Credit/Debit classification uses original Markdown markers, not LLM guesses
+- **Apple Silicon optimized** — MPS GPU acceleration where supported
 
 ## Installation
 
@@ -20,129 +21,111 @@ A fast CLI tool for extracting data tables from computer-generated financial doc
 uv sync
 ```
 
+### Ollama Setup
+
+```bash
+brew install ollama
+ollama serve
+ollama pull llama3.1:8b
+```
+
 ## Quick Start
 
 ```bash
-# Basic conversion (single file)
-uv run pdf_to_md.py statement.pdf
+# Single file → produces statement.md + statement.csv
+uv run pdf_to_csv.py statement.pdf
 
-# Overwrite existing output
-uv run pdf_to_md.py statement.pdf --overwrite
+# Batch directory → produces per-file .md files + all_transactions.csv
+uv run pdf_to_csv.py /path/to/statements/
 
-# Batch processing of entire directory
-uv run pdf_to_md.py /path/to/statements
+# Encrypted PDFs
+uv run pdf_to_csv.py /path/to/statements/ --password "your_password"
 
-# Process encrypted PDFs with password
-uv run pdf_to_md.py --password "your_password" /path/to/encrypted_statements
+# Use a different model
+uv run pdf_to_csv.py statement.pdf --model llama3.2:3b
 
-# Extract transactions using Llama3.2:3b LLM
-uv run pdf_to_md.py statement.pdf --extract-transactions
-
-# Extract transactions from directory
-uv run pdf_to_md.py /path/to/statements --extract-transactions
+# Overwrite existing outputs
+uv run pdf_to_csv.py /path/to/statements/ --overwrite --password "your_password"
 ```
 
-## Performance
+## Output
 
-Processing time on Apple Silicon (M1 Max):
+### Single File
+- `statement.md` — Markdown with extracted tables
+- `statement.csv` — cleaned transaction data
 
-| Configuration | Time | Use Case |
-|--------------|------|----------|
-| Default (OCR disabled) | ~16s | Computer-generated PDFs |
-| With OCR enabled | ~40-45s | Scanned documents |
-| With LLM enhancement | ~2-3 min | Complex/ambiguous tables |
+### Directory
+- `<name>.md` for each PDF — individual Markdown files
+- `all_transactions.csv` — merged, deduplicated, sorted master CSV
+
+### CSV Format
+
+```
+Date,Time,Description,Amount,Type
+13/03/2025,21:13:01,SWIGGY,937.00,D
+02/04/2025,12:29:45,NETBANKING TRANSFER,42545.00,C
+```
+
+- **Type**: `C` (Credit) or `D` (Debit)
+- Sorted by date and time
+- Deduplicated across statements
 
 ## Command Line Options
 
 | Option | Description |
 |--------|-------------|
-| `input_pdf` | Path to input PDF file or directory containing PDFs (required) |
-| `--overwrite` | Overwrite existing output file |
-| `--verbose`, `-v` | Show verbose output including full command |
-| `--use-llm` | Enable LLM for improved table extraction |
-| `--no-llm` | Disable LLM (overrides config) |
-| `--html-tables` | Format tables as HTML in markdown |
-| `--no-html-tables` | Use Markdown format for tables |
-| `--ollama-model MODEL` | Ollama model (default: minimax-m2.5:cloud) |
-| `--password PASS`, `-p PASS` | Password for encrypted PDF files |
-| `--workers N`, `-w N` | Parallel workers for batch processing |
-| `--config PATH` | Path to config file (default: MARKER.md) |
-| `--extract-transactions`, `-e` | Extract transactions using Llama3.2:3b LLM |
-
-## LLM Transaction Extraction
-
-The `--extract-transactions` option uses Llama3.2:3b, a locally hosted LLM available at `http://localhost:11434/`, to extract transaction data from the generated markdown. This provides clean, structured transaction tables with:
-
-- Date
-- Transaction Description  
-- Amount (in Rs.)
-
-### Requirements
-
-- **Llama3.2:3b model** must be available locally
-- Ollama service must be running on `http://localhost:11434/`
-- Requests library (automatically installed via uv sync)
-
-### How it works
-
-1. The PDF is first converted to markdown using Marker
-2. The raw markdown is analyzed by Llama3.2:3b
-3. The LLM extracts and formats transaction data into a clean table
-4. The processed markdown replaces the raw output
+| `input` | PDF file or directory of PDFs (required) |
+| `--model`, `-m` | Ollama model for extraction (default: `llama3.1:8b`) |
+| `--password`, `-p` | Password for encrypted PDFs |
+| `--overwrite` | Overwrite existing output files |
+| `--verbose`, `-v` | Verbose output |
+| `--ollama-url` | Ollama base URL (default: `http://localhost:11434`) |
+| `--config` | Marker config file (default: `MARKER.md`) |
+| `--substitutions` | Substitutions config (default: `SUBSTITUTIONS.md`) |
+| `--use-llm` | Enable Marker's built-in LLM mode |
+| `--no-llm` | Disable Marker's built-in LLM mode |
+| `--html-tables` | HTML tables in Markdown output |
+| `--workers`, `-w` | Batch size for parallel processing |
 
 ## Configuration
 
-Settings are stored in `MARKER.md`. Edit this file to change defaults:
+### `MARKER.md`
+Marker conversion settings (output format, table processing, DPI, etc.). CLI flags override these.
 
-```markdown
-# Active flags
---output_format markdown
---disable_image_extraction
---converter_cls marker.converters.table.TableConverter
---disable_ocr
+### `SUBSTITUTIONS.md`
+User-maintained text replacements applied before LLM processing:
 
-# Inactive (commented)
-# --use_llm
-# --html_tables_in_markdown
+```
+"<br>" → " "
+"SMARTBUYBANGALORE" → "SMARTBUY BANGALORE"
+"PayU*Swiggy Limited" → "SWIGGY"
 ```
 
-CLI options override config file settings.
+## Project Structure
 
-## Output
-
-### Single File Conversion
-The converted Markdown file is saved alongside the input PDF with a `.md` extension.
-
-### Batch Directory Conversion
-- **Individual Markdown files** for each PDF are saved alongside their respective source files
-- **Merged file** containing all statements: `merged_statements_YYYYMMDD_HHMMSS.md`
-- **Symlink to latest merge**: `merged_statements_latest.md` (points to the most recent merged file)
-
-The merged file includes metadata headers for each statement showing the source file name.
+```
+bankable/
+├── pdf_to_csv.py          # Main program — end-to-end PDF → CSV
+├── marker_patched.py      # Marker subprocess wrapper (applies patches)
+├── table_split_patch.py   # Fixes collapsed transaction rows in tables
+├── pdfprovider_patch.py   # Adds password support to Marker's PDF provider
+├── MARKER.md              # Marker configuration
+├── SUBSTITUTIONS.md       # Text substitution rules
+└── pyproject.toml         # Dependencies
+```
 
 ## Requirements
 
-- Python 3.10+
-- macOS with Apple Silicon (M1/M2/M3/M4) recommended
-- marker-pdf
-- Ollama (optional, for LLM enhancement)
-
-### Ollama Setup (Optional)
-
-```bash
-brew install ollama
-ollama serve
-ollama pull minimax-m2.5:cloud
-```
+- Python 3.13+
+- macOS with Apple Silicon recommended
+- [Ollama](https://ollama.com) with a model pulled (e.g. `llama3.1:8b`)
 
 ## Notes
 
-- **OCR** is disabled by default for faster processing of computer-generated PDFs. Enable in `MARKER.md` for scanned documents.
-- **GPU**: Uses Apple Silicon MPS where supported. Some models fall back to CPU.
-- **Progress bars**: Empty progress bars (0 items) are automatically filtered.
-- **Existing files**: By default, already processed files (with existing .md outputs) are skipped. Use --overwrite to force reprocessing.
-- **Encryption**: Password-protected PDFs are supported with the --password option. Encrypted files without a password will fail to process.
-- **File ordering**: Files are processed in alphabetical order for consistent results.
+- **Existing files** are skipped by default. Use `--overwrite` to reprocess.
+- **GPU**: Apple Silicon MPS where supported; some models fall back to CPU.
+- **LLM accuracy**: `llama3.1:8b` is recommended over `llama3.2:3b` for fewer digit transposition errors.
+- **Credit detection** uses `Cr` markers from the original Markdown tables, not LLM output.
 
 ## License
 
@@ -150,5 +133,5 @@ MIT License
 
 ## Acknowledgments
 
-- [Marker](https://github.com/datalab-to/marker) - PDF to Markdown conversion
-- [Ollama](https://ollama.com) - Local LLM runtime
+- [Marker](https://github.com/datalab-to/marker) — PDF to Markdown conversion
+- [Ollama](https://ollama.com) — local LLM runtime

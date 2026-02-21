@@ -1,10 +1,10 @@
 [project]
 name = "bankable"
 version = "0.1.0"
-description = "A fast CLI tool for extracting transaction data from bank/credit card statements"
+description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "marker-pdf>=1.10.2",
-    "requests>=2.31.0",
+    "pandas>=2.0",
 ]
