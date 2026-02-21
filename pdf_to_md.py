@@ -17,12 +17,12 @@ import subprocess
 import sys
 import termios
 import time
-import json
-import requests
 from pathlib import Path
 
 # Apply patch for PdfProvider password support
 from pdfprovider_patch import *
+# Apply patch for financial statement table row splitting
+from table_split_patch import patch_table_processor
 
 # Width for progress bar labels (longest is "Running OCR Error Detection")
 LABEL_WIDTH = 28
@@ -69,129 +69,6 @@ def load_marker_config(config_path: Path) -> list:
                     flags.append(parts[1])
 
     return flags
-
-
-def query_llama(prompt: str) -> str:
-    """Query Llama3.2:3b using Ollama's API"""
-    url = "http://localhost:11434/api/generate"
-    headers = {
-        "Content-Type": "application/json"
-    }
-    data = {
-        "model": "llama3.2:3b",
-        "prompt": prompt,
-        "stream": False
-    }
-    
-    try:
-        response = requests.post(url, headers=headers, data=json.dumps(data))
-        response.raise_for_status()
-        result = response.json()
-        return result.get("response", "")
-    except Exception as e:
-        print(f"Error querying Llama: {e}", file=sys.stderr)
-        return ""
-
-
-def clean_markdown(text: str) -> str:
-    """Clean markdown by replacing HTML line breaks with single spaces"""
-    # Replace all <br> tags with single spaces
-    text = re.sub(r'<br\s*/?>', ' ', text)
-    # Replace multiple spaces with single space
-    text = re.sub(r'\s+', ' ', text)
-    # Trim leading/trailing whitespace from lines
-    lines = text.split('\n')
-    cleaned_lines = []
-    for line in lines:
-        stripped = line.strip()
-        if stripped:
-            # For table lines, preserve proper formatting
-            if stripped.startswith('|') and stripped.endswith('|'):
-                # Split into cells, trim each cell, preserve separators
-                cells = stripped.split('|')
-                cleaned_cells = []
-                for i, cell in enumerate(cells):
-                    if i == 0 or i == len(cells) - 1:
-                        continue
-                    cleaned_cells.append(cell.strip())
-                cleaned_lines.append(f"| {' | '.join(cleaned_cells)} |")
-            else:
-                cleaned_lines.append(stripped)
-    return '\n'.join(cleaned_lines)
-
-def extract_transactions(text: str) -> str:
-    """Extract transactions from markdown using Llama3.2:3b"""
-    prompt = f"""
-You are an expert financial data extractor. Your task is to extract transaction data from the following bank/credit card statement text in Markdown format.
-
-The extracted data must be a single Markdown table with ONLY these columns:
-Date | Transaction Description | Amount (in Rs.)
-
-Only include actual transaction data. Exclude any header information, account details, summary tables, or other non-transaction content.
-
-Ensure the table is properly formatted and all transaction amounts are in Indian Rupees (Rs.).
-
-IMPORTANT:
-- Return ONLY the Markdown table with no additional text, explanations, or comments.
-- Do NOT include any SQL examples, use cases, or additional analysis.
-- Do NOT include negative amounts that don't make sense as transactions.
-- Do NOT include duplicate transactions or reversed transactions.
-
-Transaction text:
-```
-{text}
-```
-"""
-    
-    response = query_llama(prompt)
-    cleaned_response = clean_markdown(response)
-    return cleaned_response.strip()
-
-
-def clean_markdown(text: str) -> str:
-    """Clean markdown by replacing HTML line breaks with single spaces"""
-    # Replace all <br> tags with single spaces
-    text = re.sub(r'<br\s*/?>', ' ', text)
-    # Replace multiple spaces with single space
-    text = re.sub(r'\s+', ' ', text)
-    # Trim leading/trailing whitespace from lines
-    lines = text.split('\n')
-    cleaned_lines = []
-    for line in lines:
-        stripped = line.strip()
-        if stripped:
-            # For table lines, preserve proper formatting
-            if stripped.startswith('|') and stripped.endswith('|'):
-                # Split into cells, trim each cell, preserve separators
-                cells = stripped.split('|')
-                cleaned_cells = []
-                for i, cell in enumerate(cells):
-                    if i == 0 or i == len(cells) - 1:
-                        continue
-                    cleaned_cells.append(cell.strip())
-                cleaned_lines.append(f"| {' | '.join(cleaned_cells)} |")
-            else:
-                cleaned_lines.append(stripped)
-    return '\n'.join(cleaned_lines)
-
-
-def llm_process_markdown(text: str, input_path: str) -> str:
-    """Process markdown using LLM to extract and format transaction data"""
-    print(f"Analyzing: {os.path.basename(input_path)}...", file=sys.stderr)
-    
-    # Clean markdown before processing with LLM
-    cleaned_text = clean_markdown(text)
-    
-    # Extract transactions using LLM
-    extracted = extract_transactions(cleaned_text)
-    
-    if not extracted or "| Date |" not in extracted:
-        print(f"Warning: No transactions extracted from {os.path.basename(input_path)}, using raw markdown", file=sys.stderr)
-        return text
-    
-    # Clean the extracted markdown
-    cleaned = clean_markdown(extracted)
-    return cleaned
 
 
 def align_progress_labels(text):
@@ -303,10 +180,10 @@ def process_single_pdf(input_path: Path, args, config_flags):
     output_dir = output_path.parent
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build command from config
-    cmd = ["marker_single", str(input_path)]
-
-
+    # Build command — use patched wrapper for table row splitting fix
+    script_dir = Path(__file__).parent.resolve()
+    patched_script = script_dir / "marker_patched.py"
+    cmd = [sys.executable, str(patched_script), str(input_path)]
 
     # Add config flags (skip output_dir, we'll add it manually)
     for flag in config_flags:
@@ -431,16 +308,6 @@ def process_single_pdf(input_path: Path, args, config_flags):
                 else:
                     output_path.unlink()
             shutil.copy2(final_output, output_path)
-        
-        # Process markdown with LLM to extract transactions
-        if args.extract_transactions:
-            with open(output_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-            
-            processed_content = llm_process_markdown(content, input_path)
-            
-            with open(output_path, 'w', encoding='utf-8') as f:
-                f.write(processed_content)
 
         if expected_dir.exists() and expected_dir.is_dir():
             shutil.rmtree(expected_dir)
@@ -499,9 +366,6 @@ def process_directory(input_path: Path, args, config_flags):
                 # Still include existing file in merged content
                 with open(md_file, 'r', encoding='utf-8') as f:
                     content = f.read()
-                # If extracting transactions, process with LLM
-                if args.extract_transactions:
-                    content = llm_process_markdown(content, pdf_file)
                 merged_content.append(f"\n---\n")
                 merged_content.append(f"# {pdf_file.stem}\n")
                 merged_content.append(f"**Source File:** {pdf_file.name}\n")
@@ -598,11 +462,6 @@ def main():
         "--no-llm", action="store_true", help="Disable LLM (overrides config)"
     )
     parser.add_argument(
-        "--extract-transactions", "-e",
-        action="store_true",
-        help="Extract transactions using Llama3.2:3b LLM"
-    )
-    parser.add_argument(
         "--html-tables",
         action="store_true",
         help="Enable HTML tables (overrides config)",
@@ -634,6 +493,8 @@ def main():
     
     # Apply patches for password support
     patch_all()
+    # Apply patch for financial statement table row splitting
+    patch_table_processor()
 
     # Load config from MARKER.md
     config_flags = load_marker_config(args.config)
