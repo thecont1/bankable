@@ -21,6 +21,8 @@ from pathlib import Path
 
 # Apply patch for PdfProvider password support
 from pdfprovider_patch import *
+# Apply patch for financial statement table row splitting
+from table_split_patch import patch_table_processor
 
 # Width for progress bar labels (longest is "Running OCR Error Detection")
 LABEL_WIDTH = 28
@@ -178,10 +180,10 @@ def process_single_pdf(input_path: Path, args, config_flags):
     output_dir = output_path.parent
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build command from config
-    cmd = ["marker_single", str(input_path)]
-
-
+    # Build command — use patched wrapper for table row splitting fix
+    script_dir = Path(__file__).parent.resolve()
+    patched_script = script_dir / "marker_patched.py"
+    cmd = [sys.executable, str(patched_script), str(input_path)]
 
     # Add config flags (skip output_dir, we'll add it manually)
     for flag in config_flags:
@@ -491,6 +493,8 @@ def main():
     
     # Apply patches for password support
     patch_all()
+    # Apply patch for financial statement table row splitting
+    patch_table_processor()
 
     # Load config from MARKER.md
     config_flags = load_marker_config(args.config)
